@@ -4,6 +4,7 @@ import phreeqpython as ph
 import math
 import chemw
 import os
+from scipy.integrate import odeint
 
 # start session
 pp = ph.PhreeqPython(os.path.join(os.getcwd(), 'database', 'T_H.DAT'))
@@ -38,6 +39,11 @@ solution2.total('HCO3-', 'mmol')  + 2 * solution2.total('CO3-', 'mmol')
 solution2 = solution2.equalize(['CO2(g)'], [logCO2])
 # check alkalinity
 solution2.total('HCO3-', 'mmol')  + 2 * solution2.total('CO3-', 'mmol')
+
+# keep gas at fixed pressure
+fp = pp.add_gas({'CO2(g)': 0,}, pressure=pCO2, fixed_pressure=True)
+solution1.interact(fp.copy())
+solution2.interact(fp.copy())
 
 # specific surface area 
 ssa1 = 5 # m2 / g
@@ -90,10 +96,10 @@ amu_diop = chem_mw.mass(formula_diop)
 dens_diop = 3.4 # g mineral per cm3 mineral
 
 # basalt 1
-M0_diop1 = mass_diop1 / float(amu_diop) # mol 
+M0_diop1 = mass_diop1 / float(amu_diop) # mol
 
 # basalt 2
-M0_diop2 = mass_diop2 / float(amu_diop) # mol 
+M0_diop2 = mass_diop2 / float(amu_diop) # mol
 
 # Mineral specific surface area
 def calc_surface(mass, dens, total_ssa):
@@ -145,23 +151,31 @@ A_for2, A_plag2, A_diop2 = calc_surface(mass2, dens, ssa2) # basalt 2
 
 def calc_rate_const(k_acid, eapp_acid, n_acid, k_neut, eapp_neut, k_base, eapp_base,  n_base):
     def rate_const(sol) :
-        dif_temp = 1 / sol.temperature - 1 / 298.15
-        hplus = sol.total("H+", 'mol')
-        r_acid = k_acid * math.exp((-eapp_acid / 8.314e-3) * dif_temp) * (hplus ** n_acid)
-        r_neut = k_neut * math.exp((-eapp_neut / 8.314e-3) * dif_temp)
-        r_base = k_base * math.exp((-eapp_base / 8.314e-3) * dif_temp) * (hplus ** n_base)
+        """ 
+        R = gas constant 8.314e-3 J / K / mol   1.987 cal / mol * K
+        eapp activation energy (Kj/mol) 
+        T = K
+        k = moles/m2/s
+        """
+        temp = sol.copy()
+        dif_temp = 1 / temp.temperature - 1 / 298.15
+        hplus = temp.total("H+", 'mol')
+
+        r_acid = k_acid * math.exp((-eapp_acid / 8.314) * dif_temp) * (hplus ** n_acid)
+        r_neut = k_neut * math.exp((-eapp_neut / 8.314) * dif_temp)
+        r_base = k_base * math.exp((-eapp_base / 8.314) * dif_temp) * (hplus ** n_base)
+    
         return r_acid + r_neut + r_base
     return rate_const
+ 
 
 # function to calculate rate constant diopside
 k_diop = calc_rate_const(k_acid = 10 ** -6.36, eapp_acid = 96.1, n_acid = 0.71,  k_neut = 10 ** -11.11, eapp_neut = 40.6, k_base = 0, eapp_base = 0,  n_base = 0)
 k_for = calc_rate_const(k_acid = 10 ** -6.85, eapp_acid = 67.2, n_acid = 0.74,  k_neut = 10 ** -10.64, eapp_neut = 79, k_base = 0, eapp_base = 0,  n_base = 0)
 k_plag = calc_rate_const(k_acid = 10 ** -7.87, eapp_acid = 42.1, n_acid = 0.626,  k_neut = 10 ** -10.91, eapp_neut = 45.2, k_base = 0, eapp_base = 0,  n_base = 0)
 
-k_diop(solution1)
-
 # kinetic dissolution
-def ratefun(sol, dm, m0, A0, V, species, kfun):
+def ratefun(dm, time, sol, form, phase, m0, A0, V, kfun):
     """ 
     parameters
     --------
@@ -182,78 +196,74 @@ def ratefun(sol, dm, m0, A0, V, species, kfun):
     --------
     Dissolution rate mol/liter/sec
     """
+    # save intermediate
+    temp = sol.copy()
+
+    # add to solution
+    temp.add(form, dm[0], "mol")
+
+    # moles of phase for timestep t
+    m = m0 - dm[0]
     
     # rate constant
-    k = kfun(sol)
+    k = kfun(temp)
 
-    # initialise rate
-    rate = 0
-  
-    # moles of phase for timestep t
-    m = m0 - dm
-
-    # dissolve when phase is available and solution not saturated
-    if m >= 0 or sol.si(species) < 0:
-
-        # rate at timestep t
-        rate = (A0 / V) * (m / m0) ** 0.67 * k * (1 - sol.sr(species))
+    print("Rate constant: " + str(k))
     
+    # rate at timestep t
+    if sol.sr(phase) < 0 or m >= 0:
+        rate = (A0 / V) * (m / m0) ** 0.67 * k * (1 - sol.sr(phase))
+    else:
+        rate = 0
+    
+    temp.forget() # cleanup the no longer needed temporary solution
     return rate
 
-# calculate timeseries
-def kinetic_dissolution(solution, nmax, species, formula, surface, volume, kfun):
-   
-    # initiate arrays
-    t = np.array([])
-    y = []
+# solve ODE 
+def solve_kinetic(sol, time, form, phase, m0, A0, V, kfun):
 
-    # seconds in year
-    weeks = 7 * 24 * 3600
+    # integrate
+    yy = odeint(ratefun, 0, time, args=(sol, form, phase, m0, A0, V, kfun))
+    dif_yy = np.insert(np.diff(yy[:,0]), 0, 0)
 
-    # time steps
-    for time, sol in solution.kinetics(
-        formula,
-        rate_function=ratefun, 
-        time=np.linspace(0, nmax * weeks, 15), # 2 weeks
-        m0=M0_for1, 
-        args=(surface, volume, species, kfun)
-    ):
+    # impact on alkalinity
+    alk = []
+    for i in range(len(time)):
+        t = tt[i]
+        sol.add(form, dif_yy[i])
+        alk.append(sol.total('HCO3-', 'mmol')  + 2 * sol.total('CO3-', 'mmol'))
 
-        # save time iterated steps
-        t = np.append(t, time)
-        # output
-        y.append(solution.total('HCO3-', 'mmol')  + 2 * solution.total('CO3-', 'mmol'))
-    
-    return t, np.array(y)  
+    return np.array(alk), yy[:,0]
 
+# seconds in week
+weeks = 7 * 24 * 3600
+nmax = 2 # weeks
+tt = np.linspace(0, nmax * weeks, 25)
 
-max_time = 20 # weeks
-
-# basalt1
+# solve differential equation basalt1
 # add forsterite
-t, y_for1 = kinetic_dissolution(solution1, max_time, name_for, formula_for, A_for1, volume, k_for)
+y_for1, M_for1 = solve_kinetic(solution1, tt, formula_for, name_for, M0_for1, A_for1, volume, k_for)
 
 # add ca plagioclase
-t, y_plag1 = kinetic_dissolution(solution1, max_time, name_plag, formula_plag, A_plag1, volume, k_plag)
+y_plag1, M_plag1 = solve_kinetic(solution1, tt, formula_plag, name_plag, M0_plag1, A_plag1, volume, k_plag)
 
 # add diopside
-t, y_diop1 = kinetic_dissolution(solution1, max_time, name_diop, formula_diop, A_diop1, volume, k_diop)
+y_diop1, M_diop1 = solve_kinetic(solution1, tt, formula_diop, name_diop, M0_diop1, A_diop1, volume, k_diop)
 
-
-# basalt2
+# solve differential equation basalt2
 # add forsterite
-t, y_for2 = kinetic_dissolution(solution2, max_time, name_for, formula_for, A_for2, volume, k_for)
+y_for2, M_for2 = solve_kinetic(solution2, tt, formula_for, name_for, M0_for2, A_for2, volume, k_for)
 
 # add ca plagioclase
-t, y_plag2 = kinetic_dissolution(solution2, max_time, name_plag, formula_plag, A_plag2, volume, k_plag)
+y_plag2, M_plag2 = solve_kinetic(solution2, tt, formula_plag, name_plag, M0_plag2, A_plag2, volume, k_plag)
 
 # add diopside
-t, y_diop2 = kinetic_dissolution(solution2, max_time, name_diop, formula_diop, A_diop2, volume, k_diop)
+y_diop2, M_diop2 = solve_kinetic(solution2, tt, formula_diop, name_diop, M0_diop2, A_diop2, volume, k_diop)
 
 # Create two subplots and unpack the output array immediately
 f, (ax1, ax2) = plt.subplots(1, 2, sharey=True)
-ax1.plot(t / (7 * 24 * 3600), y_diop1, label = 'Alkalinity')
-ax2.plot(t / (7 * 24 * 3600), y_diop2, label = 'Alkalinity')
+ax1.plot(tt / weeks, y_diop1 + y_plag1 + y_for1, label = 'Alkalinity')
+ax2.plot(tt / weeks, y_diop2 + y_plag2 + y_for2, label = 'Alkalinity')
 
 # decoration
 ax1.set_xlabel('weeks')
@@ -266,18 +276,30 @@ ax2.set_title('Dissolution basalt 2')
 fig, ax = plt.subplots()
 
 # difference in alkalinity over two weeks
-diff_diop1 = y_diop1[-1] - y_diop1[0]
-diff_diop2 = y_diop2[-1] - y_diop2[0]
-diffs = [diff_diop1, diff_diop2]
+diff1 = (y_diop1[-1] + y_for1[-1] + y_plag1[-1]) - (y_diop1[0] + y_for1[0] + y_plag1[0])
+diff2 = (y_diop2[-1] + y_for2[-1] + y_plag2[-1]) - (y_diop2[0] + y_for2[0] + y_plag2[0])
+diffs = [diff1, diff2]
 names = ['Basalt 1', 'Basalt2']
 
 # barplot 
 ax.bar(names, diffs, label=names, color=['blue', 'red'])
-ax.set_ylabel('difference alkalinity (mol/l) after 2 weeks')
+ax.set_ylabel('difference alkalinity (mmol/l) after 2 weeks')
+ax.set_title('Dissolution of basalts')
+
+# bar plot of difference
+fig, ax = plt.subplots()
+
+# difference in alkalinity over two weeks
+diff1 = (M_diop1[-1] + M_for1[-1] + M_plag1[-1]) - (M_diop1[0] + M_for1[0] + M_plag1[0])
+diff2 = (M_diop2[-1] + M_for2[-1] + M_plag2[-1]) - (M_diop2[0] + M_for2[0] + M_plag2[0])
+diffs = [diff1, diff2]
+names = ['Basalt 1', 'Basalt2']
+
+# barplot 
+ax.bar(names, diffs, label=names, color=['blue', 'red'])
+ax.set_ylabel('difference mol basalt after 2 weeks')
 ax.set_title('Dissolution of basalts')
 
 plt.show()
 
-# clean
-solution1.forget()
-solution2.forget()
+math.log()
