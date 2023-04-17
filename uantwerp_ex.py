@@ -158,12 +158,12 @@ def calc_rate_const(k_acid, eapp_acid, n_acid, k_neut, eapp_neut, k_base, eapp_b
         k = moles/m2/s
         """
         temp = sol.copy()
-        dif_temp = 1 / temp.temperature - 1 / 298.15
+        dif_temp = 1 / (temp.temperature + 273.15) - 1 / 298.15
         hplus = temp.total("H+", 'mol')
 
-        r_acid = k_acid * math.exp((-eapp_acid / 8.314) * dif_temp) * (hplus ** n_acid)
-        r_neut = k_neut * math.exp((-eapp_neut / 8.314) * dif_temp)
-        r_base = k_base * math.exp((-eapp_base / 8.314) * dif_temp) * (hplus ** n_base)
+        r_acid = k_acid * math.exp((-eapp_acid / 8.314e-3) * dif_temp) * (hplus ** n_acid)
+        r_neut = k_neut * math.exp((-eapp_neut / 8.314e-3) * dif_temp)
+        r_base = k_base * math.exp((-eapp_base / 8.314e-3) * dif_temp) * (hplus ** n_base)
     
         return r_acid + r_neut + r_base
     return rate_const
@@ -237,7 +237,7 @@ def solve_kinetic(sol, time, form, phase, m0, A0, V, kfun):
 
 # seconds in week
 weeks = 7 * 24 * 3600
-nmax = 2 # weeks
+nmax = 20000 # weeks
 tt = np.linspace(0, nmax * weeks, 25)
 
 # solve differential equation basalt1
@@ -292,12 +292,12 @@ fig, ax = plt.subplots()
 # difference in alkalinity over two weeks
 diff1 = (M_diop1[-1] + M_for1[-1] + M_plag1[-1]) - (M_diop1[0] + M_for1[0] + M_plag1[0])
 diff2 = (M_diop2[-1] + M_for2[-1] + M_plag2[-1]) - (M_diop2[0] + M_for2[0] + M_plag2[0])
-diffs = [diff1, diff2]
+diffs = [diff1 * 1e3, diff2 * 1e3]
 names = ['Basalt 1', 'Basalt2']
 
 # barplot 
 ax.bar(names, diffs, label=names, color=['blue', 'red'])
-ax.set_ylabel('difference mol basalt after 2 weeks')
+ax.set_ylabel('difference mmol basalt after 2 weeks')
 ax.set_title('Dissolution of basalts')
 
 plt.show()
