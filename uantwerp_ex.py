@@ -237,7 +237,7 @@ def solve_kinetic(sol, time, form, phase, m0, A0, V, kfun):
 
 # seconds in week
 weeks = 7 * 24 * 3600
-nmax = 20000 # weeks
+nmax = 2 # weeks
 tt = np.linspace(0, nmax * weeks, 25)
 
 # solve differential equation basalt1
@@ -302,4 +302,10 @@ ax.set_title('Dissolution of basalts')
 
 plt.show()
 
-math.log()
+year = 365 * 24 * 3600
+
+M01 = M0_diop1 + M0_for1 + M0_plag1 # moles start
+M02 = M0_diop2 + M0_for2 + M0_plag2 # moles start
+
+out = (np.array([M01, M02]) * 1e3  * 0.99) / (np.array(diffs) / (2 * weeks)) # seconds
+out / year
